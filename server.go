@@ -52,7 +52,18 @@ func handleFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", appName)
 
 	filepath := path.Join((option.Root), path.Clean(r.URL.Path))
-	serveFile(filepath, w, r)
+
+	switch r.Method {
+	case "GET":
+		serveFile(filepath, w, r)
+		break
+	case "POST":
+		uploadFile(filepath, w, r)
+		break
+	case "DELETE":
+		removeFile(filepath, w, r)
+		break
+	}
 
 	log.Printf("\"%s %s %s\" \"%s\" \"%s\"\n",
 		r.Method,
@@ -60,6 +71,100 @@ func handleFile(w http.ResponseWriter, r *http.Request) {
 		r.Proto,
 		r.Referer(),
 		r.UserAgent())
+}
+
+func uploadFile(filepath string, w http.ResponseWriter, r *http.Request) {
+
+	// ensure target directory exist
+	dir := path.Dir(filepath)
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	f, err := os.Create(filepath)
+	if err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+	defer f.Close()
+
+	inputReader := r.Body
+	var cErr error
+
+	switch r.Header.Get("Content-Encoding") {
+	case "gzip":
+
+		inputReader, cErr = gzip.NewReader(inputReader)
+		if cErr != nil {
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			log.Println(cErr)
+			return
+		}
+		defer inputReader.Close()
+
+		break
+
+	case "deflate":
+		inputReader, cErr = zlib.NewReader(inputReader)
+		if cErr != nil {
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			log.Println(cErr)
+			return
+		}
+		defer inputReader.Close()
+
+		break
+	default:
+		defer inputReader.Close()
+		break
+
+	}
+
+	if _, err := io.Copy(f, inputReader); err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+}
+
+func removeFile(filepath string, w http.ResponseWriter, r *http.Request) {
+
+	// open file handle
+	f, err := os.Open(filepath)
+	if err != nil {
+		http.Error(w, "Not Found: Error while opening file", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	// ensure opened file handle is a file
+	statinfo, err := f.Stat()
+	if err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	// if directory
+	if statinfo.IsDir() {
+		http.Error(w, "Not Allowed: Delete directory is forbidden", http.StatusForbidden)
+		return
+	}
+
+	// if socket mode, forbid!
+	if (statinfo.Mode() &^ 07777) == os.ModeSocket {
+		http.Error(w, "Not Allowed: Access to this resource is not allowed", http.StatusForbidden)
+		return
+	}
+
+	if err := os.Remove(filepath); err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
 }
 
 func serveFile(filepath string, w http.ResponseWriter, r *http.Request) {
@@ -138,7 +243,7 @@ func serveFile(filepath string, w http.ResponseWriter, r *http.Request) {
 	outputWriter := w.(io.Writer)
 	isCompressedReply := false
 
-	if (option.Compression) == true && r.Header.Get("Accept-Encoding") != "" {
+	if option.Compression && r.Header.Get("Accept-Encoding") != "" {
 		encodings := parseCSV(r.Header.Get("Accept-Encoding"))
 
 		for _, val := range encodings {
