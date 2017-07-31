@@ -1,12 +1,11 @@
-package main
+package server
 
 // Option provide customizable app settings
 type Option struct {
+	AppName string `yaml:"appname"`
+
 	// Root folder
 	Root string `yaml:"root"`
-
-	// Enable conversion
-	Compression bool `yaml:"compression"`
 
 	// Allow Directory browsing and listing
 	DirListing bool `yaml:"dirlisting"`

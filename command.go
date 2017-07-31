@@ -7,13 +7,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/galihrivanto/hfs/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var (
 	rootCmd *cobra.Command
-	option  *Option
+	option  *server.Option
 	appName string
 )
 
@@ -27,7 +28,7 @@ func init() {
 	viper.AddConfigPath(fmt.Sprintf("$HOME/.%s", appName))
 	viper.AddConfigPath(".")
 
-	option = &Option{}
+	option = &server.Option{}
 
 	cobra.OnInitialize(func() {
 
@@ -47,12 +48,8 @@ func init() {
 			log.SetOutput(ioutil.Discard)
 		}
 
-		if option.Root == "" {
-			option.Root = "."
-		}
-
-		if option.ServeAddress == "" {
-			option.ServeAddress = ":3030"
+		if option.AppName == "" {
+			option.AppName = appName
 		}
 
 	})
@@ -61,7 +58,8 @@ func init() {
 		Use:   appName,
 		Short: "Http file sharing",
 		Run: func(cmd *cobra.Command, args []string) {
-			runServer()
+			server := server.NewWithOption(option)
+			server.Start()
 		},
 	}
 }

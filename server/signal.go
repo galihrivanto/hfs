@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"os"
@@ -7,9 +7,8 @@ import (
 	"syscall"
 )
 
-func waitForSignals() os.Signal {
+func waitForSignals() chan os.Signal {
 	sink := make(chan os.Signal, 1)
-	defer close(sink)
 
 	signals := []os.Signal{
 		syscall.SIGINT,
@@ -30,8 +29,6 @@ func waitForSignals() os.Signal {
 
 	// wait for signal
 	signal.Notify(sink, signals...)
-	// reset the watched signals
-	defer signal.Ignore(signals...)
 
-	return <-sink
+	return sink
 }

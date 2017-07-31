@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"compress/gzip"
@@ -21,47 +21,93 @@ import (
 
 const fsMaxBufSize = 4096
 
-func runServer() {
-	rootContext, rootCancel := context.WithCancel(context.Background())
+// HfsServer define http file sharing server
+type HfsServer struct {
+	c      context.Context
+	cancel context.CancelFunc
+	server *http.Server
+	option *Option
+}
+
+// Start running the server
+func (s *HfsServer) Start() {
 
 	server := http.Server{
-		Handler: http.HandlerFunc(handleFile),
-		Addr:    option.ServeAddress,
+		Handler: http.HandlerFunc(s.handleFile),
+		Addr:    s.option.ServeAddress,
 	}
 
 	go func() {
-		if option.SslCert != "" && option.SslKey != "" {
-			log.Fatal(server.ListenAndServeTLS(option.SslCert, option.SslKey))
+		if s.option.SslCert != "" && s.option.SslKey != "" {
+			log.Fatal(server.ListenAndServeTLS(s.option.SslCert, s.option.SslKey))
 		} else {
 			log.Fatal(server.ListenAndServe())
 		}
 	}()
 
-	log.Printf("server running on %s \n", option.ServeAddress)
+	log.Printf("server running on %s \n", s.option.ServeAddress)
 
-	// wait close signal
-	waitForSignals()
+	sink := waitForSignals()
+	defer close(sink)
+
+	select {
+	case <-s.c.Done():
+		break
+	case <-sink:
+		break
+	}
 
 	log.Println("shutting down")
-
-	server.Shutdown(rootContext)
-	rootCancel()
+	server.Shutdown(s.c)
 }
 
-func handleFile(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Server", appName)
+// Stop shutdown http file sharing server
+func (s *HfsServer) Stop() {
+	s.cancel()
+}
 
-	filepath := path.Join((option.Root), path.Clean(r.URL.Path))
+// New create server instance with default option
+func New() *HfsServer {
+	return NewWithOption(nil)
+}
+
+// NewWithOption create new service instance
+func NewWithOption(option *Option) *HfsServer {
+	if option == nil {
+		option = &Option{}
+	}
+
+	if option.Root == "" {
+		option.Root = "."
+	}
+
+	if option.ServeAddress == "" {
+		option.ServeAddress = ":3030"
+	}
+
+	c, cancel := context.WithCancel(context.Background())
+
+	return &HfsServer{
+		c:      c,
+		cancel: cancel,
+		option: option,
+	}
+}
+
+func (s *HfsServer) handleFile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Server", s.option.AppName)
+
+	filepath := path.Join((s.option.Root), path.Clean(r.URL.Path))
 
 	switch r.Method {
 	case "GET":
-		serveFile(filepath, w, r)
+		s.serveFile(filepath, w, r)
 		break
 	case "POST":
-		uploadFile(filepath, w, r)
+		s.handleUpload(filepath, w, r)
 		break
 	case "DELETE":
-		removeFile(filepath, w, r)
+		s.handleRemove(filepath, w, r)
 		break
 	}
 
@@ -73,7 +119,9 @@ func handleFile(w http.ResponseWriter, r *http.Request) {
 		r.UserAgent())
 }
 
-func uploadFile(filepath string, w http.ResponseWriter, r *http.Request) {
+func (s *HfsServer) handleUpload(filepath string, w http.ResponseWriter, r *http.Request) {
+
+	defer r.Body.Close()
 
 	// ensure target directory exist
 	dir := path.Dir(filepath)
@@ -91,46 +139,56 @@ func uploadFile(filepath string, w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	inputReader := r.Body
-	var cErr error
-
 	switch r.Header.Get("Content-Encoding") {
 	case "gzip":
 
-		inputReader, cErr = gzip.NewReader(inputReader)
-		if cErr != nil {
+		gzipReader, err := gzip.NewReader(r.Body)
+		if err != nil {
 			http.Error(w, "Internal Error", http.StatusInternalServerError)
-			log.Println(cErr)
+			log.Println(err)
 			return
 		}
-		defer inputReader.Close()
+		defer gzipReader.Close()
+
+		if _, err := io.Copy(f, gzipReader); err != nil {
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			log.Println(err)
+			return
+		}
 
 		break
 
 	case "deflate":
-		inputReader, cErr = zlib.NewReader(inputReader)
-		if cErr != nil {
+		zlibReader, err := zlib.NewReader(r.Body)
+		if err != nil {
 			http.Error(w, "Internal Error", http.StatusInternalServerError)
-			log.Println(cErr)
+			log.Println(err)
 			return
 		}
-		defer inputReader.Close()
+		defer zlibReader.Close()
+
+		if _, err := io.Copy(f, zlibReader); err != nil {
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			log.Println(err)
+			return
+		}
 
 		break
 	default:
-		defer inputReader.Close()
+
+		if _, err := io.Copy(f, r.Body); err != nil {
+			http.Error(w, "Internal Error", http.StatusInternalServerError)
+			log.Println(err)
+			return
+		}
+
 		break
 
 	}
 
-	if _, err := io.Copy(f, inputReader); err != nil {
-		http.Error(w, "Internal Error", http.StatusInternalServerError)
-		log.Println(err)
-		return
-	}
 }
 
-func removeFile(filepath string, w http.ResponseWriter, r *http.Request) {
+func (s *HfsServer) handleRemove(filepath string, w http.ResponseWriter, r *http.Request) {
 
 	// open file handle
 	f, err := os.Open(filepath)
@@ -167,7 +225,7 @@ func removeFile(filepath string, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func serveFile(filepath string, w http.ResponseWriter, r *http.Request) {
+func (s *HfsServer) serveFile(filepath string, w http.ResponseWriter, r *http.Request) {
 
 	// open file handle
 	f, err := os.Open(filepath)
@@ -188,13 +246,13 @@ func serveFile(filepath string, w http.ResponseWriter, r *http.Request) {
 	if statinfo.IsDir() {
 
 		// if directory listing is not allowed
-		if !option.DirListing {
+		if !s.option.DirListing {
 			http.Error(w, "Not Allowed: Directory listing is forbidden", http.StatusForbidden)
 			return
 		}
 
 		// handle directory listing
-		handleDirectory(f, w, r)
+		s.handleDirectory(f, w, r)
 		return
 	}
 
@@ -243,7 +301,7 @@ func serveFile(filepath string, w http.ResponseWriter, r *http.Request) {
 	outputWriter := w.(io.Writer)
 	isCompressedReply := false
 
-	if option.Compression && r.Header.Get("Accept-Encoding") != "" {
+	if r.Header.Get("Accept-Encoding") != "" {
 		encodings := parseCSV(r.Header.Get("Accept-Encoding"))
 
 		for _, val := range encodings {
@@ -307,13 +365,13 @@ func copyToArray(src *list.List) []string {
 	return dst
 }
 
-func handleDirectory(f *os.File, w http.ResponseWriter, r *http.Request) {
+func (s *HfsServer) handleDirectory(f *os.File, w http.ResponseWriter, r *http.Request) {
 	names, _ := f.Readdir(-1)
 
 	// First, check if there is any index in this folder.
 	for _, val := range names {
 		if val.Name() == "index.html" {
-			serveFile(path.Join(f.Name(), "index.html"), w, r)
+			s.serveFile(path.Join(f.Name(), "index.html"), w, r)
 			return
 		}
 	}
@@ -347,7 +405,7 @@ func handleDirectory(f *os.File, w http.ResponseWriter, r *http.Request) {
 
 	data := dirListing{
 		Name:     r.URL.Path,
-		ServerUA: appName,
+		ServerUA: s.option.AppName,
 		Dirs:     dirs,
 		Files:    files,
 	}
